@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/rs/cors"
 )
 
@@ -48,13 +49,22 @@ func (lr LoginResponse) sendResponse(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(lr)
 }
 
-var usersCache []User
+var usersNameCache []User
 var chatCache []Tuple[Message, time.Time]
 var mutex sync.Mutex
 
+var clientConnection map[*websocket.Conn]bool
+var broadcast chan []Tuple[Message, time.Time]
+
+var upgrader = websocket.Upgrader{}
+
 func main() {
-	usersCache = make([]User, 0)
+	usersNameCache = make([]User, 0)
 	chatCache = make([]Tuple[Message, time.Time], 0)
+	clientConnection = make(map[*websocket.Conn]bool)
+	broadcast = make(chan []Tuple[Message, time.Time])
+
+	go sendToAll()
 
 	mux := http.NewServeMux()
 	fs := http.FileServer(http.Dir("./static/"))
@@ -62,12 +72,14 @@ func main() {
 	mux.Handle("/", fs)
 	mux.HandleFunc("/login", handleLogin)
 
-	mux.HandleFunc("POST /message", mesageHandler)
-	mux.HandleFunc("GET /getMessages", mesageGetHandler)
+	mux.HandleFunc("/message", mesageHandler)
 
 	fmt.Println("server at localhost:8080")
 	handler := cors.Default().Handler(mux)
-	http.ListenAndServe(":8080", handler)
+
+	if err := http.ListenAndServe(":8080", handler); err != nil {
+		fmt.Println(err)
+	}
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -80,12 +92,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	var res LoginResponse
 
-	if !slices.Contains(usersCache, user) {
+	if !slices.Contains(usersNameCache, user) {
 		res.IsOk = true
 		res.Redirect = "/chat.html"
 
 		mutex.Lock()
-		usersCache = append(usersCache, user)
+		usersNameCache = append(usersNameCache, user)
 		mutex.Unlock()
 	} else {
 		res.IsOk = false
@@ -95,30 +107,49 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	res.sendResponse(w)
 }
 
-func mesageHandler(w http.ResponseWriter, r *http.Request) {
-	var msg Message
-	err := msg.decodeFromRequestBody(r.Body)
+func sendToAll() {
+	for {
+		msgs := <-broadcast
 
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		panic(err)
+		mutex.Lock()
+		for client := range clientConnection {
+			client.WriteJSON(msgs)
+		}
+		mutex.Unlock()
 	}
-
-	mutex.Lock()
-	chatCache = append(chatCache, Tuple[Message, time.Time]{Fst: msg, Scn: time.Now()})
-	mutex.Unlock()
-
-	w.WriteHeader(http.StatusAccepted)
 }
 
-func mesageGetHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	val, err := json.Marshal(chatCache)
-
+func mesageHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		panic(err)
+		return
 	}
+	defer conn.Close()
+	broadcast <- chatCache
 
-	w.Write(val)
+	var msg Message
+
+	mutex.Lock()
+	clientConnection[conn] = true
+	mutex.Unlock()
+
+	for {
+		_, inMsg, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		if err := json.Unmarshal(inMsg, &msg); err != nil {
+			fmt.Println(err)
+		}
+
+		mutex.Lock()
+		chatCache = append(chatCache, Tuple[Message, time.Time]{Fst: msg, Scn: time.Now()})
+		mutex.Unlock()
+
+		fmt.Println(msg)
+
+		broadcast <- chatCache
+	}
 }
