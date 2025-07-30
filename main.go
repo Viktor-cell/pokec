@@ -53,7 +53,7 @@ var usersNameCache []User
 var chatCache []Tuple[Message, time.Time]
 var mutex sync.Mutex
 
-var clientConnection map[*websocket.Conn]bool
+var clientConnection []*websocket.Conn
 var broadcast chan []Tuple[Message, time.Time]
 
 var upgrader = websocket.Upgrader{}
@@ -61,7 +61,7 @@ var upgrader = websocket.Upgrader{}
 func main() {
 	usersNameCache = make([]User, 0)
 	chatCache = make([]Tuple[Message, time.Time], 0)
-	clientConnection = make(map[*websocket.Conn]bool)
+	clientConnection = make([]*websocket.Conn, 0)
 	broadcast = make(chan []Tuple[Message, time.Time])
 
 	go sendToAll()
@@ -112,7 +112,7 @@ func sendToAll() {
 		msgs := <-broadcast
 
 		mutex.Lock()
-		for client := range clientConnection {
+		for _, client := range clientConnection {
 			client.WriteJSON(msgs)
 		}
 		mutex.Unlock()
@@ -130,7 +130,7 @@ func mesageHandler(w http.ResponseWriter, r *http.Request) {
 	var msg Message
 
 	mutex.Lock()
-	clientConnection[conn] = true
+	clientConnection = append(clientConnection, conn)
 	mutex.Unlock()
 
 	for {
